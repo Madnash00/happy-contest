@@ -192,67 +192,112 @@
     'use strict';
     const $=(q)=>document.querySelector(q), $$=(q)=>[...document.querySelectorAll(q)];
     const CONFIG=window.HAPPY_CONFIG||{};
-    const API_URL=String(CONFIG.apiUrl||'').trim();
+    const PUBLIC_SHEET_ID=String(CONFIG.publicSpreadsheetId||'').trim();
     const SYNC_MS=Math.max(5000,Number(CONFIG.syncIntervalMs||10000));
+    let gateway=null;
     let stores=[];
     let currentStore=null;
-    let currentStoreToken=null;
+    let currentStorePin=null;
     let adminLogged=false;
-    let adminToken=null;
+    let adminCredentials=null;
     let pendingSubmit=null;
     let leaderCode=null;
-    const pendingApi=new Map();
 
-    function apiConfigured(){return /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(API_URL);}
+    function publicConfigured(){return /^[A-Za-z0-9_-]{20,}$/.test(PUBLIC_SHEET_ID);}
     function escapeHtml(value){return String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
     function formatScore(v){return v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(1).replace('.',',');}
     function formatCurrency(v){return new Intl.NumberFormat('it-IT',{style:'currency',currency:'EUR',maximumFractionDigits:2}).format(Number(v||0));}
     function parseItalianMoney(v){const t=String(v).trim().replace(/€/g,'').replace(/\s/g,'');return Number(t.includes(',')?t.replace(/\./g,'').replace(',','.'):t);}
     function formatUpdateTime(value){if(!value)return 'Aggiornato · —';const d=value instanceof Date?value:new Date(value);return Number.isNaN(d.getTime())?'Aggiornato · —':`Aggiornato · ${new Intl.DateTimeFormat('it-IT',{hour:'2-digit',minute:'2-digit'}).format(d)}`;}
     function showToast(message,type='success'){const el=$('#toast');el.textContent=message;el.className=`toast ${type} show`;clearTimeout(showToast.t);showToast.t=setTimeout(()=>el.classList.remove('show'),3200);}
-    function setStorageMode(){
-      if(apiConfigured()){$('#storage-status').textContent='DATI CONDIVISI · GOOGLE DRIVE · AGGIORNAMENTO LIVE';$('#storage-pill').textContent='DRIVE SYNC';$('#admin-storage-note').textContent='Le correzioni vengono salvate nel database Google Drive e storicizzate.';}
-      else{$('#storage-status').textContent='CONFIGURAZIONE API RICHIESTA · INSERIRE URL APPS SCRIPT IN config.js';$('#storage-pill').textContent='API NON CONFIGURATA';$('#admin-storage-note').textContent='Configura prima l’URL /exec di Apps Script nel file config.js.';}
-    }
-
     function requestId(){return (crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(36).slice(2)}`);}
-    window.addEventListener('message',event=>{
-      const msg=event.data;
-      if(!msg||msg.source!=='HAPPY_CONTEST_API'||!msg.requestId)return;
-      const pending=pendingApi.get(msg.requestId);if(!pending)return;
-      pendingApi.delete(msg.requestId);clearTimeout(pending.timer);pending.cleanup();
-      if(msg.ok) pending.resolve(msg.data); else pending.reject(new Error(msg.error||'Errore API'));
-    });
 
-    function apiPost(action,payload={}){
-      return new Promise((resolve,reject)=>{
-        if(!apiConfigured()){reject(new Error('API Apps Script non configurata.'));return;}
-        const id=requestId(), frame=document.createElement('iframe'), form=document.createElement('form');
-        const frameName=`happy_api_${id.replace(/[^A-Za-z0-9_]/g,'')}`;
-        frame.name=frameName;frame.style.display='none';frame.setAttribute('aria-hidden','true');
-        form.method='POST';form.action=API_URL;form.target=frameName;form.style.display='none';
-        const fields={action,requestId:id,origin:location.origin,payload:JSON.stringify(payload)};
-        Object.entries(fields).forEach(([name,value])=>{const input=document.createElement('input');input.type='hidden';input.name=name;input.value=value;form.appendChild(input);});
-        document.body.append(frame,form);
-        const cleanup=()=>{form.remove();frame.remove();};
-        const timer=setTimeout(()=>{pendingApi.delete(id);cleanup();reject(new Error('Timeout API'));},15000);
-        pendingApi.set(id,{resolve,reject,timer,cleanup});
-        form.submit();
-      });
+    function setStorageMode(){
+      if(publicConfigured()&&gateway){$('#storage-status').textContent='DATI CONDIVISI · GOOGLE DRIVE · AGGIORNAMENTO LIVE';$('#storage-pill').textContent='DRIVE SYNC';$('#admin-storage-note').textContent='Le correzioni vengono inviate al gateway Google Form e registrate nel database Drive.';}
+      else if(publicConfigured()){$('#storage-status').textContent='DRIVE COLLEGATO · GATEWAY INIZIALIZZAZIONE';$('#storage-pill').textContent='GATEWAY';$('#admin-storage-note').textContent='Esegui setupGateway una volta in Apps Script per attivare scritture e sincronizzazione.';}
+      else{$('#storage-status').textContent='CONFIGURAZIONE DRIVE RICHIESTA';$('#storage-pill').textContent='NON CONFIGURATO';$('#admin-storage-note').textContent='Configura publicSpreadsheetId in config.js.';}
     }
 
-    function apiJsonp(action='publicState'){
+    function gvizRows(sheet,tq='select *'){
       return new Promise((resolve,reject)=>{
-        if(!apiConfigured()){reject(new Error('API Apps Script non configurata.'));return;}
-        const cb=`__happy_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^A-Za-z0-9_$]/g,'_');
+        if(!publicConfigured()){reject(new Error('Foglio pubblico non configurato.'));return;}
+        const cb=`__happy_gviz_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^A-Za-z0-9_$]/g,'_');
         const script=document.createElement('script');
-        const timer=setTimeout(()=>finish(new Error('Timeout sincronizzazione')),12000);
-        function finish(err,data){clearTimeout(timer);delete window[cb];script.remove();err?reject(err):resolve(data);}
-        window[cb]=(response)=>response&&response.ok?finish(null,response.data):finish(new Error(response?.error||'Errore sincronizzazione'));
-        script.onerror=()=>finish(new Error('Endpoint Apps Script non raggiungibile'));
-        script.src=`${API_URL}?action=${encodeURIComponent(action)}&prefix=${encodeURIComponent(cb)}&_=${Date.now()}`;
+        const timer=setTimeout(()=>finish(new Error('Timeout sincronizzazione Drive')),12000);
+        function finish(err,data){clearTimeout(timer);try{delete window[cb];}catch{}script.remove();err?reject(err):resolve(data);}
+        window[cb]=(response)=>{
+          try{
+            if(response?.status==='error') throw new Error(response.errors?.[0]?.detailed_message||'Errore Google Sheet');
+            const table=response?.table;if(!table)throw new Error('Risposta Google Sheet non valida.');
+            const cols=(table.cols||[]).map((c,i)=>String(c.label||c.id||`c${i}`));
+            const rows=(table.rows||[]).map(r=>Object.fromEntries(cols.map((key,i)=>[key,r.c?.[i]?.v??null])));
+            finish(null,rows);
+          }catch(err){finish(err);}
+        };
+        script.onerror=()=>finish(new Error('Foglio live non raggiungibile.'));
+        const base=`https://docs.google.com/spreadsheets/d/${encodeURIComponent(PUBLIC_SHEET_ID)}/gviz/tq`;
+        script.src=`${base}?sheet=${encodeURIComponent(sheet)}&headers=1&tqx=${encodeURIComponent(`responseHandler:${cb}`)}&tq=${encodeURIComponent(tq)}&_=${Date.now()}`;
         document.head.appendChild(script);
       });
+    }
+
+    async function loadGatewayConfig(){
+      const rows=await gvizRows('CONFIG','select A,B');
+      const map={};rows.forEach(r=>{if(r.key!=null)map[String(r.key)]=String(r.value??'');});
+      const required=['form_response_url','entry_action','entry_request_id','entry_store_code','entry_pin','entry_incassato','entry_units','entry_admin_user','entry_admin_password'];
+      if(required.some(k=>!map[k]))throw new Error('Gateway non ancora inizializzato. Esegui setupGateway in Apps Script.');
+      gateway=map;setStorageMode();return gateway;
+    }
+
+    function submitHiddenForm(fields){
+      if(!gateway)throw new Error('Gateway non inizializzato.');
+      const frame=document.createElement('iframe'),form=document.createElement('form');
+      const frameName=`happy_form_${requestId().replace(/[^A-Za-z0-9_]/g,'')}`;
+      frame.name=frameName;frame.style.display='none';frame.setAttribute('aria-hidden','true');
+      form.method='POST';form.action=gateway.form_response_url;form.target=frameName;form.style.display='none';
+      Object.entries(fields).forEach(([name,value])=>{if(!name)return;const input=document.createElement('input');input.type='hidden';input.name=name;input.value=String(value??'');form.appendChild(input);});
+      document.body.append(frame,form);form.submit();setTimeout(()=>{form.remove();frame.remove();},7000);
+    }
+
+    async function waitForAck(id,timeoutMs=18000){
+      const started=Date.now();
+      while(Date.now()-started<timeoutMs){
+        const safe=String(id).replace(/'/g,"''");
+        const rows=await gvizRows('ACK',`select A,B,C,D,E,F,G where A = '${safe}'`);
+        const ack=rows.find(r=>String(r.request_id||'')===String(id));
+        if(ack){
+          if(String(ack.status)==='OK')return ack;
+          throw new Error(String(ack.message||'Operazione non riuscita.'));
+        }
+        await new Promise(r=>setTimeout(r,850));
+      }
+      throw new Error('Nessuna conferma ricevuta dal database.');
+    }
+
+    async function gatewaySubmit(action,payload={}){
+      if(!gateway)await loadGatewayConfig();
+      const id=requestId();
+      submitHiddenForm({
+        [gateway.entry_action]:action,
+        [gateway.entry_request_id]:id,
+        [gateway.entry_store_code]:payload.storeCode||'',
+        [gateway.entry_pin]:payload.pin||'',
+        [gateway.entry_incassato]:payload.incassato??'',
+        [gateway.entry_units]:payload.units??'',
+        [gateway.entry_admin_user]:payload.adminUser||'',
+        [gateway.entry_admin_password]:payload.adminPassword||''
+      });
+      return waitForAck(id);
+    }
+
+    async function syncPublic(silent=true){
+      try{
+        const rows=await gvizRows('RANKING','select A,B,C,D,E,F');
+        const remote={stores:rows.filter(r=>r.store_code!=null).map(r=>({
+          code:String(r.store_code),name:String(r.store_name||''),score:r.score==null?null:Number(r.score),rank:r.rank==null?null:Number(r.rank),updatedAt:r.updated_at||null,status:String(r.status||'active')
+        }))};
+        mergePublicState(remote);
+      }catch(err){if(!silent)showToast('Classifica live non disponibile.','error');console.error(err);}
     }
 
     function mergePublicState(remote){
@@ -261,15 +306,6 @@
       stores=remote.stores.map(r=>{const prev=old.get(String(r.code));return {...prev,...r,code:String(r.code),score:r.score==null?null:Number(r.score),rank:r.rank==null?null:Number(r.rank),updatedAt:r.updatedAt?new Date(r.updatedAt):null,rankDelta:prev?.rank&&r.rank?prev.rank-Number(r.rank):0};});
       if(currentStore){const found=stores.find(s=>s.code===currentStore.code);if(found)currentStore={...currentStore,...found};}
       renderAll();
-    }
-    function mergePrivateStore(store){if(!store)return null;const code=String(store.code),idx=stores.findIndex(s=>s.code===code);const merged={...(idx>=0?stores[idx]:{}),...store,code,updatedAt:store.updatedAt?new Date(store.updatedAt):null};if(idx>=0)stores[idx]=merged;else stores.push(merged);return merged;}
-    function applyAdminState(state){if(!state?.stores)return;const prior=new Map(stores.map(s=>[String(s.code),s]));stores=state.stores.map(s=>({...prior.get(String(s.code)),...s,code:String(s.code),incassato:Number(s.incassato||0),units:Number(s.units||0),score:s.score==null?null:Number(s.score),rank:s.rank==null?null:Number(s.rank),updatedAt:s.updatedAt?new Date(s.updatedAt):null}));renderAll();}
-    async function syncPublic(silent=true){try{mergePublicState(await apiJsonp('publicState'));}catch(err){if(!silent)showToast('Classifica live non disponibile.','error');console.error(err);}}
-    async function syncPrivate(){
-      try{
-        if(adminLogged&&adminToken){const r=await apiPost('getAdminState',{token:adminToken});applyAdminState(r.state);}
-        else if(currentStore&&currentStoreToken){const r=await apiPost('getStoreState',{token:currentStoreToken});if(r.publicState)mergePublicState(r.publicState);currentStore=mergePrivateStore(r.store);fillStore(currentStore);}
-      }catch(err){console.error(err);}
     }
 
     function scaleForLeader(score){const n=Number(score)||0;return Math.max(100,Math.ceil((n*1.08)/10)*10);}
@@ -295,26 +331,26 @@
 
     function setView(view){$$('.view').forEach(v=>v.classList.toggle('is-active',v.id===`view-${view}`));$$('.nav-btn').forEach(b=>b.classList.toggle('is-active',b.dataset.view===view));location.hash=view;window.scrollTo({top:0,behavior:'smooth'});}
     $$('.nav-btn').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
-    function fillStore(s){if(!s)return;$('#store-name').textContent=s.name;$('#store-rank').textContent=s.rank??'—';$('#store-score').textContent=formatScore(s.score);$('#store-last-update').textContent=formatUpdateTime(s.updatedAt);if(s.incassato!=null)$('#revenue-input').value=Number(s.incassato).toFixed(2).replace('.',',');if(s.units!=null)$('#units-input').value=Number(s.units);}
+    function fillStore(s){if(!s)return;$('#store-name').textContent=s.name;$('#store-rank').textContent=s.rank??'—';$('#store-score').textContent=formatScore(s.score);$('#store-last-update').textContent=formatUpdateTime(s.updatedAt);}
 
-    $('#store-login-form').addEventListener('submit',async e=>{e.preventDefault();try{const code=$('#store-code').value.trim(),pin=$('#store-pin').value.trim();const auth=await apiPost('authenticateStore',{code,pin});currentStoreToken=auth.token;if(auth.publicState)mergePublicState(auth.publicState);currentStore=mergePrivateStore(auth.store);$('#store-login-card').classList.add('hidden');$('#store-dashboard').classList.remove('hidden');fillStore(currentStore);showToast('Negozio riconosciuto. Buon Happy Day!');}catch(err){showToast('Codice negozio o PIN non corretti.','error');console.error(err);}});
-    $('#store-logout').addEventListener('click',()=>{currentStore=null;currentStoreToken=null;$('#store-login-card').classList.remove('hidden');$('#store-dashboard').classList.add('hidden');});
+    $('#store-login-form').addEventListener('submit',async e=>{e.preventDefault();const code=$('#store-code').value.trim(),pin=$('#store-pin').value.trim();try{await gatewaySubmit('LOGIN_STORE',{storeCode:code,pin});const store=stores.find(s=>s.code===code);if(!store)throw new Error('Negozio non trovato nella classifica.');currentStorePin=pin;currentStore=store;$('#store-login-card').classList.add('hidden');$('#store-dashboard').classList.remove('hidden');$('#revenue-input').value='';$('#units-input').value='';fillStore(currentStore);showToast('Negozio riconosciuto. Buon Happy Day!');}catch(err){showToast(err.message||'Codice negozio o PIN non corretti.','error');console.error(err);}});
+    $('#store-logout').addEventListener('click',()=>{currentStore=null;currentStorePin=null;$('#store-login-card').classList.remove('hidden');$('#store-dashboard').classList.add('hidden');});
     $('#store-update-form').addEventListener('submit',e=>{e.preventDefault();if(!currentStore)return;const incassato=parseItalianMoney($('#revenue-input').value),units=Number($('#units-input').value);if(!Number.isFinite(incassato)||incassato<0||!Number.isInteger(units)||units<0){showToast('Controlla i valori inseriti.','error');return;}pendingSubmit={incassato,units};$('#confirm-revenue').textContent=formatCurrency(incassato);$('#confirm-units').textContent=`${units} pezzi`;$('#confirm-dialog').showModal();});
-    $('#confirm-dialog').addEventListener('close',async()=>{if($('#confirm-dialog').returnValue!=='default'||!pendingSubmit||!currentStore)return;const prevRank=currentStore.rank,values=pendingSubmit;pendingSubmit=null;try{const result=await apiPost('saveStoreUpdate',{token:currentStoreToken,incassato:values.incassato,units:values.units});if(result.publicState)mergePublicState(result.publicState);currentStore=mergePrivateStore(result.updated);fillStore(currentStore);const delta=prevRank&&currentStore.rank?prevRank-currentStore.rank:0;showToast(delta>0?`Score aggiornato: avete guadagnato ${delta} posizioni!`:'Score aggiornato. La gara continua!');}catch(err){showToast('Non riusciamo a salvare l’aggiornamento. Riprova.','error');console.error(err);}});
+    $('#confirm-dialog').addEventListener('close',async()=>{if($('#confirm-dialog').returnValue!=='default'||!pendingSubmit||!currentStore)return;const prevRank=currentStore.rank,values=pendingSubmit;pendingSubmit=null;try{const ack=await gatewaySubmit('UPDATE_STORE',{storeCode:currentStore.code,pin:currentStorePin,incassato:values.incassato,units:values.units});await syncPublic(true);const found=stores.find(s=>s.code===currentStore.code);if(found)currentStore=found;fillStore(currentStore);const delta=prevRank&&currentStore.rank?prevRank-currentStore.rank:0;showToast(delta>0?`Score aggiornato: avete guadagnato ${delta} posizioni!`:'Score aggiornato. La gara continua!');}catch(err){showToast(err.message||'Non riusciamo a salvare l’aggiornamento. Riprova.','error');console.error(err);}});
 
-    $('#admin-login-form').addEventListener('submit',async e=>{e.preventDefault();try{const auth=await apiPost('authenticateAdmin',{user:$('#admin-user').value.trim(),password:$('#admin-pass').value});adminToken=auth.token;adminLogged=true;applyAdminState(auth.state);$('#admin-login-card').classList.add('hidden');$('#admin-dashboard').classList.remove('hidden');$('#admin-count').textContent=stores.length;renderAdminRows();showToast('Control Room collegata a Drive.');}catch(err){showToast('Credenziali admin non corrette.','error');console.error(err);}});
-    $('#admin-logout').addEventListener('click',()=>{adminLogged=false;adminToken=null;$('#admin-login-card').classList.remove('hidden');$('#admin-dashboard').classList.add('hidden');syncPublic(true);});
-    function renderAdminRows(){const q=$('#admin-search').value.trim().toLowerCase();const rows=[...stores].sort((a,b)=>(a.rank??999)-(b.rank??999)||a.name.localeCompare(b.name,'it')).filter(s=>!q||s.name.toLowerCase().includes(q)||s.code.includes(q));$('#admin-count').textContent=stores.length;$('#admin-table-body').innerHTML=rows.map(s=>`<tr><td>${s.rank??'<span class="status-pending">ATTESA</span>'}</td><td><strong>${escapeHtml(s.name)}</strong><br><small>${escapeHtml(s.code)}</small></td><td>${s.incassato==null?'—':formatCurrency(s.incassato)}</td><td>${s.units==null?'—':s.units}</td><td class="score-admin">${formatScore(s.score)}</td><td class="admin-row-actions"><button class="text-btn edit-store" data-code="${escapeHtml(s.code)}">Modifica</button></td></tr>`).join('');}
+    $('#admin-login-form').addEventListener('submit',async e=>{e.preventDefault();const adminUser=$('#admin-user').value.trim(),adminPassword=$('#admin-pass').value;try{await gatewaySubmit('ADMIN_LOGIN',{adminUser,adminPassword});adminCredentials={adminUser,adminPassword};adminLogged=true;$('#admin-login-card').classList.add('hidden');$('#admin-dashboard').classList.remove('hidden');$('#admin-count').textContent=stores.length;renderAdminRows();showToast('Control Room collegata a Drive.');}catch(err){showToast(err.message||'Credenziali admin non corrette.','error');console.error(err);}});
+    $('#admin-logout').addEventListener('click',()=>{adminLogged=false;adminCredentials=null;$('#admin-login-card').classList.remove('hidden');$('#admin-dashboard').classList.add('hidden');});
+    function renderAdminRows(){const q=$('#admin-search').value.trim().toLowerCase();const rows=[...stores].sort((a,b)=>(a.rank??999)-(b.rank??999)||a.name.localeCompare(b.name,'it')).filter(s=>!q||s.name.toLowerCase().includes(q)||s.code.includes(q));$('#admin-count').textContent=stores.length;$('#admin-table-body').innerHTML=rows.map(s=>`<tr><td>${s.rank??'<span class="status-pending">ATTESA</span>'}</td><td><strong>${escapeHtml(s.name)}</strong><br><small>${escapeHtml(s.code)}</small></td><td>—</td><td>—</td><td class="score-admin">${formatScore(s.score)}</td><td class="admin-row-actions"><button class="text-btn edit-store" data-code="${escapeHtml(s.code)}">Modifica</button></td></tr>`).join('');}
     $('#admin-search').addEventListener('input',renderAdminRows);
-    $('#admin-table-body').addEventListener('click',e=>{const b=e.target.closest('.edit-store');if(!b)return;const s=stores.find(x=>x.code===b.dataset.code);if(!s||s.incassato==null)return;$('#admin-edit-panel').classList.remove('hidden');$('#admin-edit-code').value=s.code;$('#admin-edit-name').textContent=s.name;$('#admin-edit-revenue').value=Number(s.incassato).toFixed(2).replace('.',',');$('#admin-edit-units').value=s.units;});
+    $('#admin-table-body').addEventListener('click',e=>{const b=e.target.closest('.edit-store');if(!b)return;const s=stores.find(x=>x.code===b.dataset.code);if(!s)return;$('#admin-edit-panel').classList.remove('hidden');$('#admin-edit-code').value=s.code;$('#admin-edit-name').textContent=s.name;$('#admin-edit-revenue').value='';$('#admin-edit-units').value='';});
     $('#admin-edit-close').addEventListener('click',()=>$('#admin-edit-panel').classList.add('hidden'));
-    $('#admin-edit-form').addEventListener('submit',async e=>{e.preventDefault();const code=$('#admin-edit-code').value,incassato=parseItalianMoney($('#admin-edit-revenue').value),units=Number($('#admin-edit-units').value);if(!Number.isFinite(incassato)||incassato<0||!Number.isInteger(units)||units<0){showToast('Controlla i valori.','error');return;}try{const result=await apiPost('saveAdminUpdate',{token:adminToken,storeCode:code,incassato,units});applyAdminState(result.state);$('#admin-edit-panel').classList.add('hidden');showToast('Correzione salvata su Drive.');}catch(err){showToast('Non riusciamo a salvare la correzione.','error');console.error(err);}});
-    $('#export-btn').addEventListener('click',()=>{if(!adminLogged)return;const rows=[['Posizione','Codice','Negozio','Incassato','Pezzi','Score','Aggiornato'],...stores.map(s=>[s.rank??'',s.code,s.name,s.incassato??'',s.units??'',s.score==null?'':s.score.toFixed(4),s.updatedAt?new Date(s.updatedAt).toLocaleString('it-IT'):''])];const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(';')).join('\n');const blob=new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='HAPPY_CONTEST_export.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),500);});
+    $('#admin-edit-form').addEventListener('submit',async e=>{e.preventDefault();if(!adminCredentials)return;const code=$('#admin-edit-code').value,incassato=parseItalianMoney($('#admin-edit-revenue').value),units=Number($('#admin-edit-units').value);if(!Number.isFinite(incassato)||incassato<0||!Number.isInteger(units)||units<0){showToast('Controlla i valori.','error');return;}try{await gatewaySubmit('ADMIN_UPDATE',{...adminCredentials,storeCode:code,incassato,units});await syncPublic(true);$('#admin-edit-panel').classList.add('hidden');showToast('Correzione salvata su Drive.');}catch(err){showToast(err.message||'Non riusciamo a salvare la correzione.','error');console.error(err);}});
+    $('#export-btn').addEventListener('click',()=>{if(!adminLogged)return;const rows=[['Posizione','Codice','Negozio','Score','Aggiornato'],...stores.map(s=>[s.rank??'',s.code,s.name,s.score==null?'':s.score.toFixed(4),s.updatedAt?new Date(s.updatedAt).toLocaleString('it-IT'):''])];const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(';')).join('\n');const blob=new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='HAPPY_CONTEST_export.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),500);});
     $('#presentation-btn').addEventListener('click',async()=>{document.body.classList.toggle('presentation');if(document.body.classList.contains('presentation')){try{await document.documentElement.requestFullscreen();}catch{}}else if(document.fullscreenElement)document.exitFullscreen();});
     document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)document.body.classList.remove('presentation');});
 
     renderAll();setStorageMode();
-    if(apiConfigured()){syncPublic(false);setInterval(()=>syncPublic(true),SYNC_MS);setInterval(syncPrivate,Math.max(12000,SYNC_MS));}
+    (async()=>{if(!publicConfigured())return;try{await loadGatewayConfig();await syncPublic(false);setInterval(()=>syncPublic(true),SYNC_MS);}catch(err){console.error(err);showToast(err.message||'Gateway Drive non disponibile.','error');setStorageMode();}})();
     const hash=location.hash.replace('#','');if(['live','store','admin'].includes(hash))setView(hash);
   })();
   </script>
