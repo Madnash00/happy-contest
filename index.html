@@ -137,7 +137,7 @@
         <div id="admin-login-card" class="panel auth-card">
           <h2>Accesso amministratore</h2>
           <form id="admin-login-form" class="form-stack">
-            <label>Username<input id="admin-user" autocomplete="username" required placeholder="admin"></label>
+            <label>Username<input id="admin-user" autocomplete="username" required placeholder="TeamFR"></label>
             <label>Password<input id="admin-pass" type="password" autocomplete="current-password" required placeholder="••••••••"></label>
             <button class="btn btn-primary" type="submit">ENTRA NELLA CONTROL ROOM</button>
           </form>
@@ -618,6 +618,7 @@
       const code=$('#admin-edit-code').value,incassato=parseItalianMoney($('#admin-edit-revenue').value),units=Number($('#admin-edit-units').value),newPin=$('#admin-edit-pin').value.trim();
       const original=adminState.find(s=>s.code===code);
       if(!Number.isFinite(incassato)||incassato<0||!Number.isInteger(units)||units<0||!/^\d{4}$/.test(newPin)){showToast('Controlla i valori e il PIN a 4 cifre.','error');return;}
+      showRankingUpdateAnimation();
       try{
         let ack=null;
         if(!original||Math.abs(incassato-original.incassato)>.001||units!==original.units){
@@ -629,8 +630,10 @@
           ack=await gatewaySubmit('ADMIN_SET_PIN',{...adminCredentials,storeCode:code,newPin});
           await applyAdminAck(ack,adminCredentials.adminPassword);
         }
-        await syncPublic(true);$('#admin-edit-panel').classList.add('hidden');showToast('Modifiche salvate su Drive.');
-      }catch(err){showToast(err.message||'Non riusciamo a salvare le modifiche.','error');console.error(err);}
+        await syncPublic(true);
+        await hideRankingUpdateAnimation(true);
+        $('#admin-edit-panel').classList.add('hidden');showToast('Modifiche salvate su Drive.');
+      }catch(err){await hideRankingUpdateAnimation(false);showToast(err.message||'Non riusciamo a salvare le modifiche.','error');console.error(err);}
     });
     $('#import-btn').addEventListener('click',()=>$('#logic-file-input').click());
     $('#logic-file-input').addEventListener('change',async e=>{
