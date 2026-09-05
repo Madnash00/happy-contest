@@ -1,5 +1,5 @@
 window.HAPPY_CONFIG = {
-  // Incolla qui l'URL /exec della distribuzione Apps Script API.
-  apiUrl: 'https://script.google.com/macros/s/AKfycbyqz0ZUzJuJCXpcBkkqt4wtWNUeGye-pzKVkd9TYKktczKltI8XBn8d0HSTGjjXio04bg/exec',
+  publicSpreadsheetId: '1c7iiWEH7egKEwXTz5bvm2JcymClUqQDCa_fImI59Upk',
   syncIntervalMs: 10000
 };
+
