@@ -1,4 +1,4 @@
 window.HAPPY_CONFIG = {
-  syncIntervalMs: 10000,
-  stateUrl: ''
+  publicSpreadsheetId: '1c7iiWEH7egKEwXTz5bvm2JcymClUqQDCa_fImI59Upk',
+  syncIntervalMs: 10000
 };
