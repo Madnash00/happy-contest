@@ -209,9 +209,9 @@
     <div class="ranking-update-card">
       <div class="ranking-update-star" aria-hidden="true">★</div>
       <p class="eyebrow pink">HAPPY CONTEST LIVE</p>
-      <h2>Aggiorniamo la gara…</h2>
+      <h2 id="ranking-update-title">Aggiorniamo la gara…</h2>
       <p id="ranking-update-copy">Stiamo registrando i dati e riallineando il ranking in tempo reale.</p>
-      <div class="ranking-update-stage">
+      <div id="ranking-update-stage" class="ranking-update-stage">
         <div class="ranking-update-step"><i>✓</i><span>Salvataggio nuovi dati</span></div>
         <div class="ranking-update-step"><i>★</i><span>Ricalcolo score</span></div>
         <div class="ranking-update-step"><i>↕</i><span>Aggiornamento classifica</span></div>
@@ -559,32 +559,75 @@
     }
 
     let rankingUpdateStartedAt=0;
-    function showRankingUpdateAnimation(){
+    const defaultOverlaySteps=[
+      {icon:'✓',label:'Salvataggio nuovi dati'},
+      {icon:'★',label:'Ricalcolo score'},
+      {icon:'↕',label:'Aggiornamento classifica'}
+    ];
+    function renderOverlaySteps(steps){
+      $('#ranking-update-stage').innerHTML=(steps||defaultOverlaySteps).map(step=>`<div class="ranking-update-step"><i>${escapeHtml(step.icon||'•')}</i><span>${escapeHtml(step.label||'')}</span></div>`).join('');
+    }
+    function showLoadingOverlay(options={}){
       const overlay=$('#ranking-update-overlay');
+      const title=options.title||'Aggiorniamo la gara…';
+      const copy=options.copy||'Stiamo registrando i dati e riallineando il ranking in tempo reale.';
       rankingUpdateStartedAt=Date.now();
       overlay.classList.remove('is-done');
       overlay.classList.add('is-active');
       overlay.setAttribute('aria-hidden','false');
-      $('#ranking-update-copy').textContent='Stiamo registrando i dati e riallineando il ranking in tempo reale.';
+      $('#ranking-update-title').textContent=title;
+      $('#ranking-update-copy').textContent=copy;
+      renderOverlaySteps(options.steps||defaultOverlaySteps);
+      overlay.dataset.doneMessage=options.doneMessage||'Fatto! Score e classifica sono aggiornati.';
+      overlay.dataset.minDuration=String(options.minDuration||1400);
+      overlay.dataset.doneDelay=String(options.doneDelay||520);
+    }
+    function showRankingUpdateAnimation(){
+      showLoadingOverlay({
+        title:'Aggiorniamo la gara…',
+        copy:'Stiamo registrando i dati e riallineando il ranking in tempo reale.',
+        steps:defaultOverlaySteps,
+        doneMessage:'Fatto! Score e classifica sono aggiornati.',
+        minDuration:1400,
+        doneDelay:520
+      });
+    }
+    function showAccessLoadingAnimation(mode='store'){
+      const isAdmin=mode==='admin';
+      showLoadingOverlay({
+        title:isAdmin?'Stiamo aprendo la Control Room…':'Stiamo aprendo la tua area negozio…',
+        copy:isAdmin?'Verifichiamo le credenziali e colleghiamo la dashboard ai dati live.':'Verifichiamo le credenziali e prepariamo il tuo pannello con score e ranking aggiornati.',
+        steps:[
+          {icon:'✓',label:'Verifica credenziali'},
+          {icon:isAdmin?'⚙':'★',label:isAdmin?'Connessione alla dashboard admin':'Connessione al profilo negozio'},
+          {icon:'↗',label:isAdmin?'Apertura Control Room':'Apertura area aggiorna'}
+        ],
+        doneMessage:isAdmin?'Accesso confermato! Apriamo la Control Room.':'Accesso confermato! Apriamo la tua area negozio.',
+        minDuration:1100,
+        doneDelay:480
+      });
     }
     async function hideRankingUpdateAnimation(success=true){
       const overlay=$('#ranking-update-overlay');
       const elapsed=Date.now()-rankingUpdateStartedAt;
       if(success){
-        if(elapsed<1400)await new Promise(r=>setTimeout(r,1400-elapsed));
+        const minDuration=Number(overlay.dataset.minDuration||1400);
+        const doneDelay=Number(overlay.dataset.doneDelay||520);
+        if(elapsed<minDuration)await new Promise(r=>setTimeout(r,minDuration-elapsed));
         overlay.classList.add('is-done');
-        $('#ranking-update-copy').textContent='Fatto! Score e classifica sono aggiornati.';
-        await new Promise(r=>setTimeout(r,520));
+        $('#ranking-update-copy').textContent=overlay.dataset.doneMessage||'Fatto! Score e classifica sono aggiornati.';
+        await new Promise(r=>setTimeout(r,doneDelay));
       }
       overlay.classList.remove('is-active','is-done');
       overlay.setAttribute('aria-hidden','true');
+      overlay.dataset.doneMessage='';
     }
 
     function setView(view){$$('.view').forEach(v=>v.classList.toggle('is-active',v.id===`view-${view}`));$$('.nav-btn').forEach(b=>b.classList.toggle('is-active',b.dataset.view===view));location.hash=view;window.scrollTo({top:0,behavior:'smooth'});}
     $$('.nav-btn').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
     function fillStore(s){if(!s)return;$('#store-name').textContent=s.name;$('#store-rank').textContent=s.rank??'—';$('#store-score').textContent=formatScore(s.score);$('#store-last-update').textContent=formatUpdateTime(s.updatedAt);}
 
-    $('#store-login-form').addEventListener('submit',async e=>{e.preventDefault();const code=$('#store-code').value.trim(),pin=$('#store-pin').value.trim();try{await gatewaySubmit('LOGIN_STORE',{storeCode:code,pin});const store=stores.find(s=>s.code===code);if(!store)throw new Error('Negozio non trovato nella classifica.');currentStorePin=pin;currentStore=store;$('#store-login-card').classList.add('hidden');$('#store-dashboard').classList.remove('hidden');$('#revenue-input').value='';$('#units-input').value='';fillStore(currentStore);showToast('Negozio riconosciuto. Buon Happy Day!');}catch(err){showToast(err.message||'Codice negozio o PIN non corretti.','error');console.error(err);}});
+    $('#store-login-form').addEventListener('submit',async e=>{e.preventDefault();const code=$('#store-code').value.trim(),pin=$('#store-pin').value.trim();showAccessLoadingAnimation('store');try{await gatewaySubmit('LOGIN_STORE',{storeCode:code,pin});const store=stores.find(s=>s.code===code);if(!store)throw new Error('Negozio non trovato nella classifica.');currentStorePin=pin;currentStore=store;$('#store-login-card').classList.add('hidden');$('#store-dashboard').classList.remove('hidden');$('#revenue-input').value='';$('#units-input').value='';fillStore(currentStore);await hideRankingUpdateAnimation(true);showToast('Negozio riconosciuto. Buon Happy Day!');}catch(err){await hideRankingUpdateAnimation(false);showToast(err.message||'Codice negozio o PIN non corretti.','error');console.error(err);}});
     $('#store-logout').addEventListener('click',()=>{currentStore=null;currentStorePin=null;$('#store-login-card').classList.remove('hidden');$('#store-dashboard').classList.add('hidden');});
     $('#store-update-form').addEventListener('submit',e=>{e.preventDefault();if(!currentStore)return;const incassato=parseItalianMoney($('#revenue-input').value),units=Number($('#units-input').value);if(!Number.isFinite(incassato)||incassato<0||!Number.isInteger(units)||units<0){showToast('Controlla i valori inseriti.','error');return;}pendingSubmit={incassato,units};$('#confirm-revenue').textContent=formatCurrency(incassato);$('#confirm-units').textContent=`${units} pezzi`;$('#confirm-dialog').showModal();});
     $('#confirm-dialog').addEventListener('close',async()=>{if($('#confirm-dialog').returnValue!=='default'||!pendingSubmit||!currentStore)return;const prevRank=currentStore.rank,values=pendingSubmit;pendingSubmit=null;showRankingUpdateAnimation();try{await gatewaySubmit('UPDATE_STORE',{storeCode:currentStore.code,pin:currentStorePin,incassato:values.incassato,units:values.units});await syncPublic(true);const found=stores.find(s=>s.code===currentStore.code);if(found)currentStore=found;fillStore(currentStore);const delta=prevRank&&currentStore.rank?prevRank-currentStore.rank:0;await hideRankingUpdateAnimation(true);showToast(delta>0?`Score aggiornato: avete guadagnato ${delta} posizioni!`:'Score aggiornato. La gara continua!');}catch(err){await hideRankingUpdateAnimation(false);showToast(err.message||'Non riusciamo a salvare l’aggiornamento. Riprova.','error');console.error(err);}});
@@ -592,13 +635,16 @@
     $('#admin-login-form').addEventListener('submit',async e=>{
       e.preventDefault();
       const adminUser=$('#admin-user').value.trim(),adminPassword=$('#admin-pass').value;
+      showAccessLoadingAnimation('admin');
       try{
         const ack=await gatewaySubmit('ADMIN_LOGIN',{adminUser,adminPassword});
         await applyAdminAck(ack,adminPassword);
         adminCredentials={adminUser,adminPassword};adminLogged=true;
         $('#admin-login-card').classList.add('hidden');$('#admin-dashboard').classList.remove('hidden');
-        $('#admin-count').textContent=adminState.length;renderAdminRows();showToast('Control Room collegata a Drive.');
-      }catch(err){showToast(err.message||'Credenziali admin non corrette.','error');console.error(err);}
+        $('#admin-count').textContent=adminState.length;renderAdminRows();
+        await hideRankingUpdateAnimation(true);
+        showToast('Control Room collegata a Drive.');
+      }catch(err){await hideRankingUpdateAnimation(false);showToast(err.message||'Credenziali admin non corrette.','error');console.error(err);}
     });
     $('#admin-logout').addEventListener('click',()=>{
       adminLogged=false;adminCredentials=null;adminState=[];$('#admin-pass').value='';
