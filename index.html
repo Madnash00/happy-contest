@@ -378,7 +378,7 @@
       if(lastFreshError&&(Number(lastFreshError.status)===403||Number(lastFreshError.status)===429)){
         throw new Error('Conferma non ricevuta: GitHub ha temporaneamente limitato le richieste. Riprova tra poco.');
       }
-      throw new Error('Nessuna conferma ricevuta dal database. Verifica il trigger Apps Script con diagnoseGatewayHealth().');
+      throw new Error('Nessuna conferma ricevuta dal database. Esegui repairGatewayFormAccess() e poi diagnoseGatewayHealth() in Apps Script.');
     }
 
     async function gatewaySubmit(action,payload={}){
