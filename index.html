@@ -254,13 +254,17 @@
       else{$('#storage-status').textContent='CONFIGURAZIONE DRIVE RICHIESTA';$('#storage-pill').textContent='NON CONFIGURATO';$('#admin-storage-note').textContent='Configura publicSpreadsheetId in config.js.';}
     }
 
-    function gvizRows(sheet,tq='select *'){
+    function gvizAttempt(sheet,tq,mode='modern'){
       return new Promise((resolve,reject)=>{
-        if(!publicConfigured()){reject(new Error('Foglio pubblico non configurato.'));return;}
         const cb=`__happy_gviz_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^A-Za-z0-9_$]/g,'_');
         const script=document.createElement('script');
+        let settled=false;
         const timer=setTimeout(()=>finish(new Error('Timeout sincronizzazione Drive')),12000);
-        function finish(err,data){clearTimeout(timer);try{delete window[cb];}catch{}script.remove();err?reject(err):resolve(data);}
+        function finish(err,data){
+          if(settled)return;settled=true;clearTimeout(timer);
+          try{delete window[cb];}catch{}
+          script.remove();err?reject(err):resolve(data);
+        }
         window[cb]=(response)=>{
           try{
             if(response?.status==='error') throw new Error(response.errors?.[0]?.detailed_message||'Errore Google Sheet');
@@ -271,10 +275,29 @@
           }catch(err){finish(err);}
         };
         script.onerror=()=>finish(new Error('Foglio live non raggiungibile.'));
-        const base=`https://docs.google.com/spreadsheets/d/${encodeURIComponent(PUBLIC_SHEET_ID)}/gviz/tq`;
-        script.src=`${base}?sheet=${encodeURIComponent(sheet)}&headers=1&tqx=${encodeURIComponent(`responseHandler:${cb}`)}&tq=${encodeURIComponent(tq)}&_=${Date.now()}`;
+        const params=`sheet=${encodeURIComponent(sheet)}&headers=1&tqx=${encodeURIComponent(`responseHandler:${cb}`)}&tq=${encodeURIComponent(tq)}&_=${Date.now()}`;
+        if(mode==='legacy'){
+          script.src=`https://spreadsheets.google.com/tq?key=${encodeURIComponent(PUBLIC_SHEET_ID)}&pub=1&${params}`;
+        }else{
+          script.src=`https://docs.google.com/spreadsheets/d/${encodeURIComponent(PUBLIC_SHEET_ID)}/gviz/tq?${params}`;
+        }
         document.head.appendChild(script);
       });
+    }
+
+    async function gvizRows(sheet,tq='select *'){
+      if(!publicConfigured())throw new Error('Foglio pubblico non configurato.');
+      try{
+        return await gvizAttempt(sheet,tq,'modern');
+      }catch(primaryError){
+        try{
+          return await gvizAttempt(sheet,tq,'legacy');
+        }catch(fallbackError){
+          const err=new Error('Foglio live non raggiungibile da questo dispositivo.');
+          err.cause={primary:primaryError,fallback:fallbackError};
+          throw err;
+        }
+      }
     }
 
     async function loadGatewayConfig(){
