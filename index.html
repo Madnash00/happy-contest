@@ -225,8 +225,20 @@
     'use strict';
     const $=(q)=>document.querySelector(q), $$=(q)=>[...document.querySelectorAll(q)];
     const CONFIG=window.HAPPY_CONFIG||{};
-    const PUBLIC_SHEET_ID=String(CONFIG.publicSpreadsheetId||'').trim();
     const SYNC_MS=Math.max(5000,Number(CONFIG.syncIntervalMs||10000));
+    function deriveRelayStateUrl(){
+      const override=String(CONFIG.stateUrl||'').trim();
+      if(override)return override;
+      const host=String(location.hostname||'').toLowerCase();
+      if(host.endsWith('.github.io')){
+        const owner=host.split('.')[0];
+        const parts=String(location.pathname||'/').split('/').filter(Boolean);
+        const repo=parts[0]||`${owner}.github.io`;
+        return `https://raw.githubusercontent.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/live-state/live-state.json`;
+      }
+      return '';
+    }
+    const RELAY_STATE_URL=deriveRelayStateUrl();
     let gateway=null;
     let stores=[];
     let currentStore=null;
@@ -239,7 +251,7 @@
     let pendingSubmit=null;
     let leaderCode=null;
 
-    function publicConfigured(){return /^[A-Za-z0-9_-]{20,}$/.test(PUBLIC_SHEET_ID);}
+    function publicConfigured(){return /^https:\/\//i.test(RELAY_STATE_URL);}
     function escapeHtml(value){return String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
     function formatScore(v){return v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(1).replace('.',',');}
     function formatCurrency(v){return new Intl.NumberFormat('it-IT',{style:'currency',currency:'EUR',maximumFractionDigits:2}).format(Number(v||0));}
@@ -251,60 +263,31 @@
     function setStorageMode(){
       if(publicConfigured()&&gateway){$('#storage-status').textContent='DATI CONDIVISI · GOOGLE DRIVE · AGGIORNAMENTO LIVE';$('#storage-pill').textContent='DRIVE SYNC';$('#admin-storage-note').textContent='Le correzioni vengono inviate al gateway Google Form e registrate nel database Drive.';}
       else if(publicConfigured()){$('#storage-status').textContent='DRIVE COLLEGATO · GATEWAY INIZIALIZZAZIONE';$('#storage-pill').textContent='GATEWAY';$('#admin-storage-note').textContent='Esegui setupGateway una volta in Apps Script per attivare scritture e sincronizzazione.';}
-      else{$('#storage-status').textContent='CONFIGURAZIONE DRIVE RICHIESTA';$('#storage-pill').textContent='NON CONFIGURATO';$('#admin-storage-note').textContent='Configura publicSpreadsheetId in config.js.';}
+      else{$('#storage-status').textContent='CONFIGURAZIONE DRIVE RICHIESTA';$('#storage-pill').textContent='NON CONFIGURATO';$('#admin-storage-note').textContent='Configura stateUrl in config.js oppure pubblica su GitHub Pages.';}
     }
 
-    function gvizAttempt(sheet,tq,mode='modern'){
-      return new Promise((resolve,reject)=>{
-        const cb=`__happy_gviz_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^A-Za-z0-9_$]/g,'_');
-        const script=document.createElement('script');
-        let settled=false;
-        const timer=setTimeout(()=>finish(new Error('Timeout sincronizzazione Drive')),12000);
-        function finish(err,data){
-          if(settled)return;settled=true;clearTimeout(timer);
-          try{delete window[cb];}catch{}
-          script.remove();err?reject(err):resolve(data);
-        }
-        window[cb]=(response)=>{
-          try{
-            if(response?.status==='error') throw new Error(response.errors?.[0]?.detailed_message||'Errore Google Sheet');
-            const table=response?.table;if(!table)throw new Error('Risposta Google Sheet non valida.');
-            const cols=(table.cols||[]).map((c,i)=>String(c.label||c.id||`c${i}`));
-            const rows=(table.rows||[]).map(r=>Object.fromEntries(cols.map((key,i)=>[key,r.c?.[i]?.v??null])));
-            finish(null,rows);
-          }catch(err){finish(err);}
-        };
-        script.onerror=()=>finish(new Error('Foglio live non raggiungibile.'));
-        const params=`sheet=${encodeURIComponent(sheet)}&headers=1&tqx=${encodeURIComponent(`responseHandler:${cb}`)}&tq=${encodeURIComponent(tq)}&_=${Date.now()}`;
-        if(mode==='legacy'){
-          script.src=`https://spreadsheets.google.com/tq?key=${encodeURIComponent(PUBLIC_SHEET_ID)}&pub=1&${params}`;
-        }else{
-          script.src=`https://docs.google.com/spreadsheets/d/${encodeURIComponent(PUBLIC_SHEET_ID)}/gviz/tq?${params}`;
-        }
-        document.head.appendChild(script);
-      });
-    }
-
-    async function gvizRows(sheet,tq='select *'){
-      if(!publicConfigured())throw new Error('Foglio pubblico non configurato.');
+    async function fetchRelayState(timeoutMs=12000){
+      if(!publicConfigured())throw new Error('Relay GitHub non configurato.');
+      const sep=RELAY_STATE_URL.includes('?')?'&':'?';
+      const url=`${RELAY_STATE_URL}${sep}v=${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      let timer;
       try{
-        return await gvizAttempt(sheet,tq,'modern');
-      }catch(primaryError){
-        try{
-          return await gvizAttempt(sheet,tq,'legacy');
-        }catch(fallbackError){
-          const err=new Error('Foglio live non raggiungibile da questo dispositivo.');
-          err.cause={primary:primaryError,fallback:fallbackError};
-          throw err;
-        }
-      }
+        const response=await Promise.race([
+          fetch(url,{cache:'no-store',credentials:'omit',headers:{Accept:'application/json'}}),
+          new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Timeout sincronizzazione GitHub')),timeoutMs);})
+        ]);
+        if(!response||!response.ok)throw new Error(`Relay GitHub non raggiungibile (${response?response.status:'rete'}).`);
+        const data=await response.json();
+        if(!data||!Array.isArray(data.ranking)||!data.config||!Array.isArray(data.acks))throw new Error('Stato live GitHub non valido.');
+        return data;
+      }finally{clearTimeout(timer);}
     }
 
     async function loadGatewayConfig(){
-      const rows=await gvizRows('CONFIG','select A,B');
-      const map={};rows.forEach(r=>{if(r.key!=null)map[String(r.key)]=String(r.value??'');});
+      const state=await fetchRelayState();
+      const map=state.config||{};
       const required=['form_response_url','entry_action','entry_request_id','entry_store_code','entry_pin','entry_incassato','entry_units','entry_admin_user','entry_admin_password','entry_new_pin','entry_logic_payload'];
-      if(required.some(k=>!map[k]))throw new Error('Gateway non ancora inizializzato. Esegui setupGateway in Apps Script.');
+      if(required.some(k=>!map[k]))throw new Error('Gateway non ancora inizializzato. Esegui setupGateway e setupGithubRelay in Apps Script.');
       gateway=map;setStorageMode();return gateway;
     }
 
@@ -318,17 +301,16 @@
       document.body.append(frame,form);form.submit();setTimeout(()=>{form.remove();frame.remove();},7000);
     }
 
-    async function waitForAck(id,timeoutMs=18000){
+    async function waitForAck(id,timeoutMs=30000){
       const started=Date.now();
       while(Date.now()-started<timeoutMs){
-        const safe=String(id).replace(/'/g,"''");
-        const rows=await gvizRows('ACK',`select A,B,C,D,E,F,G,H where A = '${safe}'`);
-        const ack=rows.find(r=>String(r.request_id||'')===String(id));
+        const state=await fetchRelayState();
+        const ack=(state.acks||[]).find(r=>String(r.request_id||'')===String(id));
         if(ack){
           if(String(ack.status)==='OK')return ack;
           throw new Error(String(ack.message||'Operazione non riuscita.'));
         }
-        await new Promise(r=>setTimeout(r,850));
+        await new Promise(r=>setTimeout(r,700));
       }
       throw new Error('Nessuna conferma ricevuta dal database.');
     }
@@ -520,9 +502,10 @@
 
     async function syncPublic(silent=true){
       try{
-        const rows=await gvizRows('RANKING','select A,B,C,D,E,F');
+        const state=await fetchRelayState();
+        const rows=state.ranking||[];
         const remote={stores:rows.filter(r=>r.store_code!=null).map(r=>({
-          code:String(r.store_code),name:String(r.store_name||''),score:r.score==null?null:Number(r.score),rank:r.rank==null?null:Number(r.rank),updatedAt:r.updated_at||null,status:String(r.status||'active')
+          code:String(r.store_code),name:String(r.store_name||''),score:r.score==null||r.score===''?null:Number(r.score),rank:r.rank==null||r.rank===''?null:Number(r.rank),updatedAt:r.updated_at||null,status:String(r.status||'active')
         }))};
         mergePublicState(remote);
         if(adminLogged)refreshAdminSnapshot(true);
