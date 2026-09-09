@@ -347,7 +347,14 @@
       const started=Date.now();
       while(Date.now()-started<timeoutMs){
         const safe=String(id).replace(/'/g,"''");
-        const rows=await gvizRows('ACK',`select A,B,C,D,E,F,G,H where A = '${safe}'`);
+        let rows=null;
+        try{
+          rows=await gvizRows('ACK',`select A,B,C,D,E,F,G,H where A = '${safe}'`);
+        }catch(err){
+          console.warn('ACK temporaneamente non leggibile, nuovo tentativo in corso.',err);
+          await new Promise(r=>setTimeout(r,pollInterval));
+          continue;
+        }
         const ack=rows.find(r=>String(r.request_id||'')===String(id));
         if(ack){
           if(String(ack.status)==='OK')return ack;
@@ -355,7 +362,7 @@
         }
         await new Promise(r=>setTimeout(r,pollInterval));
       }
-      throw new Error('Nessuna conferma ricevuta dal database.');
+      throw new Error('La conferma sta impiegando più del previsto. Riprova tra pochi secondi.');
     }
 
     async function gatewaySubmit(action,payload={}){
@@ -374,7 +381,7 @@
         [gateway.entry_logic_payload]:payload.logicPayload||''
       });
       const loginAction=action==='LOGIN_STORE'||action==='ADMIN_LOGIN';
-      return waitForAck(id,loginAction?14000:18000,loginAction?350:850);
+      return waitForAck(id,loginAction?14000:45000,loginAction?350:850);
     }
 
     function b64urlToBytes(text){
@@ -778,7 +785,7 @@
         await syncPublic(true);
         await hideRankingUpdateAnimation(true);
         $('#admin-edit-panel').classList.add('hidden');$('#admin-grid').classList.remove('admin-edit-open');showToast(canEditAmounts?'Modifiche salvate su Drive.':'PIN salvato su Drive.');
-      }catch(err){await hideRankingUpdateAnimation(false);showToast(err.message||'Non riusciamo a salvare le modifiche.','error');console.error(err);}
+      }catch(err){await hideRankingUpdateAnimation(false);showUpdateFailurePopup();console.error(err);}
     });
     $('#import-btn').addEventListener('click',()=>$('#logic-file-input').click());
     $('#logic-file-input').addEventListener('change',async e=>{
